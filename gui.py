@@ -17,6 +17,7 @@
 import sys
 import os
 import threading
+import socket
 from pathlib import Path
 from PyQt5 import QtWidgets, QtCore, QtGui
 
@@ -190,16 +191,25 @@ class BidirectionalTab(QtWidgets.QWidget):
         """清空日志按钮点击事件"""
         self.log.clear()
     
-    def append_log(self, text):
-        """添加日志信息（线程安全）"""
-        if isinstance(text, tuple) and len(text) > 1:
-            format_str = text[0]
-            args = text[1:]
-            text = format_str % args
+    def append_log(self, *args):
+        """处理日志输出，支持格式化参数"""
+        if len(args) == 0:
+            return
+            
+        # 如果只有一个参数，直接使用
+        if len(args) == 1:
+            text = str(args[0])
+        # 如果有多个参数，第一个是格式字符串，其余是参数
+        else:
+            try:
+                text = args[0] % args[1:]
+            except:
+                # 如果格式化失败，将所有参数连接起来
+                text = ' '.join(str(arg) for arg in args)
         
         QtCore.QMetaObject.invokeMethod(
             self, "_safe_append_log", QtCore.Qt.QueuedConnection,
-            QtCore.Q_ARG(str, str(text))
+            QtCore.Q_ARG(str, text)
         )
     
     @QtCore.pyqtSlot(str)
@@ -264,6 +274,7 @@ class BidirectionalTab(QtWidgets.QWidget):
         
         self.sync_thread = threading.Thread(target=run_sync, daemon=True)
         self.sync_thread.start()
+        
     
     @QtCore.pyqtSlot()
     def on_sync_finished(self):
@@ -312,10 +323,13 @@ class SendTab(QtWidgets.QWidget):
         network_group = QtWidgets.QGroupBox("网络设置")
         form_layout = QtWidgets.QFormLayout(network_group)
         
+        self.host_edit = QtWidgets.QLineEdit('192.168.1.100')
+        self.host_edit.setPlaceholderText("接收方设备的IP地址")
         self.port_edit = QtWidgets.QLineEdit('9000')
-        self.port_edit.setToolTip("发送服务监听的端口号")
+        self.port_edit.setToolTip("接收方服务的端口号")
         
-        form_layout.addRow('监听端口:', self.port_edit)
+        form_layout.addRow('接收方地址:', self.host_edit)
+        form_layout.addRow('端口号:', self.port_edit)
         layout.addWidget(network_group)
         
         # === 控制按钮 ===
@@ -324,7 +338,7 @@ class SendTab(QtWidgets.QWidget):
         
         self.btn_start = QtWidgets.QPushButton('开始发送')
         self.btn_start.clicked.connect(self.on_start)
-        self.btn_start.setToolTip("启动文件发送服务，等待接收方连接")
+        self.btn_start.setToolTip("连接到接收方并开始发送文件")
         
         self.btn_stop = QtWidgets.QPushButton('停止')
         self.btn_stop.clicked.connect(self.on_stop)
@@ -361,15 +375,25 @@ class SendTab(QtWidgets.QWidget):
     def on_clear_log(self):
         self.log.clear()
     
-    def append_log(self, text):
-        if isinstance(text, tuple) and len(text) > 1:
-            format_str = text[0]
-            args = text[1:]
-            text = format_str % args
+    def append_log(self, *args):
+        """处理日志输出，支持格式化参数"""
+        if len(args) == 0:
+            return
+            
+        # 如果只有一个参数，直接使用
+        if len(args) == 1:
+            text = str(args[0])
+        # 如果有多个参数，第一个是格式字符串，其余是参数
+        else:
+            try:
+                text = args[0] % args[1:]
+            except:
+                # 如果格式化失败，将所有参数连接起来
+                text = ' '.join(str(arg) for arg in args)
         
         QtCore.QMetaObject.invokeMethod(
             self, "_safe_append_log", QtCore.Qt.QueuedConnection,
-            QtCore.Q_ARG(str, str(text))
+            QtCore.Q_ARG(str, text)
         )
     
     @QtCore.pyqtSlot(str)
@@ -390,6 +414,11 @@ class SendTab(QtWidgets.QWidget):
             QtWidgets.QMessageBox.warning(self, '错误', '选择的文件夹不存在')
             return
         
+        host = self.host_edit.text().strip()
+        if not host:
+            QtWidgets.QMessageBox.warning(self, '错误', '请输入接收方地址')
+            return
+        
         port = self.port_edit.text().strip()
         if not port.isdigit():
             QtWidgets.QMessageBox.warning(self, '错误', '端口号必须是数字')
@@ -397,13 +426,15 @@ class SendTab(QtWidgets.QWidget):
         port = int(port)
         
         self.append_log('启动发送模式...')
+        self.append_log(f'正在连接到接收方 {host}:{port}...')
         self.sync_running = True
         self.btn_start.setEnabled(False)
         self.btn_stop.setEnabled(True)
         
         def run_sync():
             try:
-                sync.run_send(port, folder, self.append_log)
+                # 正确的调用方式：发送方需要主机地址、端口号、文件夹和日志回调函数
+                sync.run_send(host, port, folder, self.append_log)
             except Exception as e:
                 self.append_log(f'发送错误: {e}')
             finally:
@@ -414,6 +445,7 @@ class SendTab(QtWidgets.QWidget):
         
         self.sync_thread = threading.Thread(target=run_sync, daemon=True)
         self.sync_thread.start()
+        
     
     @QtCore.pyqtSlot()
     def on_sync_finished(self):
@@ -460,14 +492,16 @@ class ReceiveTab(QtWidgets.QWidget):
         network_group = QtWidgets.QGroupBox("网络设置")
         form_layout = QtWidgets.QFormLayout(network_group)
         
-        self.host_edit = QtWidgets.QLineEdit('192.168.1.100')
-        self.host_edit.setPlaceholderText("发送方设备的IP地址")
+        # 获取本机IP地址
+        local_ip = self.get_local_ip()
+        self.ip_label = QtWidgets.QLabel(f'本机IP地址: {local_ip}')
+        self.ip_label.setStyleSheet('color: blue; font-weight: bold;')
         
         self.port_edit = QtWidgets.QLineEdit('9000')
-        self.port_edit.setToolTip("发送方服务的端口号")
+        self.port_edit.setToolTip("接收方监听的端口号")
         
-        form_layout.addRow('发送方地址:', self.host_edit)
-        form_layout.addRow('端口号:', self.port_edit)
+        form_layout.addRow('', self.ip_label)
+        form_layout.addRow('监听端口:', self.port_edit)
         layout.addWidget(network_group)
         
         # === 控制按钮 ===
@@ -476,7 +510,7 @@ class ReceiveTab(QtWidgets.QWidget):
         
         self.btn_start = QtWidgets.QPushButton('开始接收')
         self.btn_start.clicked.connect(self.on_start)
-        self.btn_start.setToolTip("连接到发送方并开始接收文件")
+        self.btn_start.setToolTip("启动监听服务，等待发送方连接")
         
         self.btn_stop = QtWidgets.QPushButton('停止')
         self.btn_stop.clicked.connect(self.on_stop)
@@ -503,6 +537,18 @@ class ReceiveTab(QtWidgets.QWidget):
         
         layout.addStretch(1)
     
+    def get_local_ip(self):
+        """获取本机IP地址"""
+        try:
+            # 创建一个临时socket连接来获取本机IP
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            local_ip = s.getsockname()[0]
+            s.close()
+            return local_ip
+        except:
+            return "无法获取IP地址"
+    
     def on_browse(self):
         current_dir = self.folder_edit.text() or str(Path.cwd())
         selected_dir = QtWidgets.QFileDialog.getExistingDirectory(
@@ -513,15 +559,25 @@ class ReceiveTab(QtWidgets.QWidget):
     def on_clear_log(self):
         self.log.clear()
     
-    def append_log(self, text):
-        if isinstance(text, tuple) and len(text) > 1:
-            format_str = text[0]
-            args = text[1:]
-            text = format_str % args
+    def append_log(self, *args):
+        """处理日志输出，支持格式化参数"""
+        if len(args) == 0:
+            return
+            
+        # 如果只有一个参数，直接使用
+        if len(args) == 1:
+            text = str(args[0])
+        # 如果有多个参数，第一个是格式字符串，其余是参数
+        else:
+            try:
+                text = args[0] % args[1:]
+            except:
+                # 如果格式化失败，将所有参数连接起来
+                text = ' '.join(str(arg) for arg in args)
         
         QtCore.QMetaObject.invokeMethod(
             self, "_safe_append_log", QtCore.Qt.QueuedConnection,
-            QtCore.Q_ARG(str, str(text))
+            QtCore.Q_ARG(str, text)
         )
     
     @QtCore.pyqtSlot(str)
@@ -542,11 +598,6 @@ class ReceiveTab(QtWidgets.QWidget):
             QtWidgets.QMessageBox.warning(self, '错误', '选择的文件夹不存在')
             return
         
-        host = self.host_edit.text().strip()
-        if not host:
-            QtWidgets.QMessageBox.warning(self, '错误', '请输入发送方地址')
-            return
-        
         port = self.port_edit.text().strip()
         if not port.isdigit():
             QtWidgets.QMessageBox.warning(self, '错误', '端口号必须是数字')
@@ -554,13 +605,16 @@ class ReceiveTab(QtWidgets.QWidget):
         port = int(port)
         
         self.append_log('启动接收模式...')
+        self.append_log(f'正在监听端口 {port}，等待发送方连接...')
+        self.append_log(f'请告知发送方使用本机IP地址: {self.get_local_ip()}')
         self.sync_running = True
         self.btn_start.setEnabled(False)
         self.btn_stop.setEnabled(True)
         
         def run_sync():
             try:
-                sync.run_receive(host, port, folder, self.append_log)
+                # 正确的调用方式：接收方需要端口号、文件夹、日志回调函数和绑定地址
+                sync.run_receive(port, folder, self.append_log, '0.0.0.0')
             except Exception as e:
                 self.append_log(f'接收错误: {e}')
             finally:
@@ -571,6 +625,7 @@ class ReceiveTab(QtWidgets.QWidget):
         
         self.sync_thread = threading.Thread(target=run_sync, daemon=True)
         self.sync_thread.start()
+        
     
     @QtCore.pyqtSlot()
     def on_sync_finished(self):

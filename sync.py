@@ -139,6 +139,9 @@ def receive_file(sock, base_dir, header):
     out_path = Path(base_dir) / rel_path
     out_path.parent.mkdir(parents=True, exist_ok=True)
     received = 0
+      # 添加调试信息
+    logging.info('Saving file to: %s', out_path)
+    
     with open(str(out_path) + '.tmp', 'wb') as f:
         while True:
             ln_b = recvn(sock, 4)
@@ -152,9 +155,23 @@ def receive_file(sock, base_dir, header):
                 raise ConnectionError('Unexpected EOF during file transfer chunk')
             f.write(chunk)
             received += len(chunk)
-    os.replace(str(out_path) + '.tmp', out_path)
-    logging.info('Received file: %s (%d bytes)', rel, received)
-
+    
+    # 添加文件保存确认
+    logging.info('Temporary file created, size: %d bytes', received)
+    
+    try:
+        os.replace(str(out_path) + '.tmp', out_path)
+        logging.info('File successfully saved: %s (%d bytes)', rel, received)
+    except Exception as e:
+        logging.error('Failed to rename file %s: %s', out_path, e)
+        # 如果重命名失败，尝试直接复制
+        try:
+            import shutil
+            shutil.copy(str(out_path) + '.tmp', out_path)
+            os.remove(str(out_path) + '.tmp')
+            logging.info('File saved using copy method: %s', rel)
+        except Exception as e2:
+            logging.error('Failed to save file using copy method: %s', e2)
 
 # --- 单向传输逻辑 ---
 
@@ -353,27 +370,27 @@ def run_connect(host, port, base_dir, log_callback=None):
         handle_connection(sock, base_dir, log_callback)
 
 
-def run_send(port, base_dir, log_callback=None, bind='0.0.0.0'):
-    """运行发送方模式"""
+def run_send(host, port, base_dir, log_callback=None):
+    """运行发送方模式：主动连接接收方并发送文件"""
     log_func = log_callback or logging.info
-    log_func('Starting as sender on %s:%d', bind, port)
+    log_func('Connecting to receiver %s:%d ...', host, port)
+    with socket.create_connection((host, port), timeout=30) as sock:
+        log_func('Connected to receiver %s:%d', host, port)
+        handle_unidirectional_send(sock, base_dir, log_callback)
+
+
+def run_receive(port, base_dir, log_callback=None, bind='0.0.0.0'):
+    """运行接收方模式：启动监听服务等待发送方连接"""
+    log_func = log_callback or logging.info
+    log_func('Listening for sender on %s:%d', bind, port)
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         s.bind((bind, port))
         s.listen(1)
         conn, addr = s.accept()
-        log_func('Accepted connection from receiver %s:%d', addr[0], addr[1])
+        log_func('Accepted connection from sender %s:%d', addr[0], addr[1])
         with conn:
-            handle_unidirectional_send(conn, base_dir, log_callback)
-
-
-def run_receive(host, port, base_dir, log_callback=None):
-    """运行接收方模式"""
-    log_func = log_callback or logging.info
-    log_func('Connecting to sender %s:%d ...', host, port)
-    with socket.create_connection((host, port), timeout=30) as sock:
-        log_func('Connected to sender %s:%d', host, port)
-        handle_unidirectional_receive(sock, base_dir, log_callback)
+            handle_unidirectional_receive(conn, base_dir, log_callback)
 
 
 def main():
@@ -381,8 +398,8 @@ def main():
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument('--listen', action='store_true', help='listen for a peer (bidirectional)')
     group.add_argument('--connect', metavar='HOST', help='connect to a listening peer (bidirectional)')
-    group.add_argument('--send', action='store_true', help='run as sender (unidirectional)')
-    group.add_argument('--receive', metavar='HOST', help='connect to a sender (unidirectional)')
+    group.add_argument('--send', metavar='HOST', help='run as sender (unidirectional)')
+    group.add_argument('--receive', action='store_true', help='run as receiver (unidirectional)')
     parser.add_argument('--port', type=int, default=9000, help='port to listen/connect (default: 9000)')
     parser.add_argument('--bind', default='0.0.0.0', help='bind address for listen (default: 0.0.0.0)')
     args = parser.parse_args()
@@ -394,9 +411,9 @@ def main():
     elif args.connect:
         run_connect(args.connect, args.port, cwd)
     elif args.send:
-        run_send(args.port, cwd, bind=args.bind)
+        run_send(args.send, args.port, cwd)  # args.send now contains the host
     elif args.receive:
-        run_receive(args.receive, args.port, cwd)
+        run_receive(args.port, cwd, bind=args.bind)
 
 if __name__ == '__main__':
     main()
