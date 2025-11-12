@@ -1,19 +1,21 @@
 """
-简单的局域网双向一次性同步工具
+简单的局域网文件同步工具（支持双向和单向模式）
 
 运行方式（示例）:
-  监听方（机器 A）:
-    python sync.py --listen --port 9000
+  双向同步模式:
+    监听方（机器 A）: python sync.py --listen --port 9000
+    连接方（机器 B）: python sync.py --connect 192.168.1.100 --port 9000
 
-  连接方（机器 B）:
-    python sync.py --connect 192.168.1.100 --port 9000
+  单向传输模式（发送方 -> 接收方）:
+    发送方: python sync.py --send --port 9000
+    接收方: python sync.py --receive 192.168.1.100 --port 9000
 
 在当前工作目录下运行脚本（脚本会同步该目录及子目录）。
 
 协议概述：
 - 双方交换清单（relative path, size, mtime, sha256）
-- 双方各生成想要从对方获取的文件列表（remote newer 或 本地无）并发送请求
-- 双方并行处理来自对方的请求（对方会发送文件）并发送自己需要的文件
+- 双向模式：双方各生成想要从对方获取的文件列表并发送请求
+- 单向模式：发送方发送所有文件给接收方
 - 传输使用简单 JSON 报文（4 字节长度前缀 + JSON）和原始字节流传输文件内容
 
 注意：该脚本以简洁为主，适合受信任的局域网环境；未实现认证和加密。
@@ -31,7 +33,10 @@ import threading
 import logging
 from pathlib import Path
 
-logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(message)s')
+# 将日志配置移到模块级别，避免重复配置
+if not logging.getLogger().handlers:
+    logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(message)s')
+
 CHUNK_SIZE = 64 * 1024
 
 # --- helpers ---
@@ -151,39 +156,113 @@ def receive_file(sock, base_dir, header):
     logging.info('Received file: %s (%d bytes)', rel, received)
 
 
-# --- main sync logic ---
+# --- 单向传输逻辑 ---
 
-def handle_connection(sock, base_dir):
-    """Exchange manifests and then mutually request/send files.
-
-    Protocol steps:
-    1. send manifest
-    2. recv peer manifest
-    3. compute want_list (files I want from peer)
-    4. send {'type':'want','files':[...]} message
-    5. concurrently process incoming messages until both sides signal done
-    """
+def handle_unidirectional_send(sock, base_dir, log_callback=None):
+    """发送方逻辑：发送所有文件给接收方"""
     base_dir = Path(base_dir)
-    # start receiver thread that will process incoming messages (requests and file transfers)
+    my_manifest = build_manifest(base_dir)
+    log_func = log_callback or logging.info
+    log_func('Built local manifest with %d files', len(my_manifest))
+    
+    # 发送模式标识
+    send_json(sock, {'type': 'mode', 'mode': 'send'})
+    
+    # 发送文件清单
+    send_json(sock, {'type': 'manifest', 'manifest': my_manifest})
+    log_func('Sent manifest with %d files', len(my_manifest))
+    
+    # 等待接收方确认
+    msg = recv_json(sock)
+    if not msg or msg.get('type') != 'ready':
+        log_func('Expected ready message from receiver, got: %s', msg)
+        return
+    
+    # 发送所有文件
+    total_files = len(my_manifest)
+    sent_files = 0
+    for relpath in my_manifest:
+        try:
+            send_file_by_rel(sock, base_dir, relpath)
+            sent_files += 1
+            log_func('Progress: %d/%d files sent - %s', sent_files, total_files, relpath)
+        except Exception as e:
+            log_func('Failed to send file %s: %s', relpath, e)
+    
+    # 发送完成信号
+    send_json(sock, {'type': 'done_sending'})
+    log_func('All files sent successfully (%d files)', sent_files)
+
+def handle_unidirectional_receive(sock, base_dir, log_callback=None):
+    """接收方逻辑：接收所有来自发送方的文件"""
+    base_dir = Path(base_dir)
+    log_func = log_callback or logging.info
+    
+    # 接收模式标识
+    msg = recv_json(sock)
+    if not msg or msg.get('type') != 'mode' or msg.get('mode') != 'send':
+        log_func('Expected send mode from sender, got: %s', msg)
+        return
+    
+    # 接收文件清单
+    msg = recv_json(sock)
+    if not msg or msg.get('type') != 'manifest':
+        log_func('Expected manifest from sender, got: %s', msg)
+        return
+    
+    sender_manifest = msg['manifest']
+    log_func('Received manifest with %d files from sender', len(sender_manifest))
+    
+    # 发送确认信号
+    send_json(sock, {'type': 'ready'})
+    
+    # 接收所有文件
+    received_files = 0
+    total_files = len(sender_manifest)
+    
+    while True:
+        msg = recv_json(sock)
+        if not msg:
+            break
+            
+        if msg.get('type') == 'file':
+            receive_file(sock, base_dir, msg)
+            received_files += 1
+            log_func('Progress: %d/%d files received - %s', received_files, total_files, msg['path'])
+        elif msg.get('type') == 'done_sending':
+            log_func('Sender finished sending all files')
+            break
+        else:
+            log_func('Unexpected message type: %s', msg.get('type'))
+    
+    log_func('All files received successfully (%d files)', received_files)
+
+# --- 双向同步逻辑 ---
+
+def handle_connection(sock, base_dir, log_callback=None):
+    """Exchange manifests and then mutually request/send files."""
+    base_dir = Path(base_dir)
+    log_func = log_callback or logging.info
+    
     incoming_done = threading.Event()
     outgoing_done = threading.Event()
     peer_manifest = {}
     my_manifest = build_manifest(base_dir)
-    logging.info('Built local manifest with %d files', len(my_manifest))
+    log_func('Built local manifest with %d files', len(my_manifest))
 
     # send my manifest
     send_json(sock, {'type': 'manifest', 'manifest': my_manifest})
-    logging.info('Sent local manifest')
+    log_func('Sent local manifest')
 
     # receive peer manifest
     msg = recv_json(sock)
     if not msg or msg.get('type') != 'manifest':
-        logging.error('Expected manifest from peer, got: %s', msg)
+        log_func('Expected manifest from peer, got: %s', msg)
         return
     peer_manifest = msg['manifest']
-    logging.info('Received peer manifest with %d files', len(peer_manifest))
+    log_func('Received peer manifest with %d files', len(peer_manifest))
 
-    # compute want list: files that peer has and (we don't have OR peer mtime > our mtime and sha differ)
+    # compute want list
     want = []
     for rel, meta in peer_manifest.items():
         if rel not in my_manifest:
@@ -192,9 +271,8 @@ def handle_connection(sock, base_dir):
             my_meta = my_manifest[rel]
             if my_meta['sha256'] != meta['sha256'] and meta['mtime'] > my_meta['mtime']:
                 want.append(rel)
-    logging.info('Will request %d files from peer', len(want))
+    log_func('Will request %d files from peer', len(want))
 
-    # Similarly compute will_send list (peer might want some of our files)
     will_send = []
     for rel, meta in my_manifest.items():
         if rel not in peer_manifest:
@@ -203,11 +281,7 @@ def handle_connection(sock, base_dir):
             peer_meta = peer_manifest[rel]
             if peer_meta['sha256'] != meta['sha256'] and my_manifest[rel]['mtime'] > peer_meta['mtime']:
                 will_send.append(rel)
-    logging.info('Peer may request up to %d files from us', len(will_send))
-
-    # structures for coordinating
-    recv_lock = threading.Lock()
-    # When receiver sees a 'want' from peer, it will queue files to send
+    log_func('Peer may request up to %d files from us', len(will_send))
 
     def receiver():
         nonlocal incoming_done
@@ -215,51 +289,42 @@ def handle_connection(sock, base_dir):
             while True:
                 m = recv_json(sock)
                 if m is None:
-                    logging.info('Connection closed by peer')
+                    log_func('Connection closed by peer')
                     break
                 t = m.get('type')
                 if t == 'want':
                     files = m.get('files', [])
-                    logging.info('Peer requested %d files', len(files))
+                    log_func('Peer requested %d files', len(files))
                     for f in files:
-                        # send each file
                         try:
                             send_file_by_rel(sock, base_dir, f)
+                            log_func('Sent file to peer: %s', f)
                         except Exception as e:
-                            logging.error('Failed to send file %s: %s', f, e)
-                    # after sending requested files, send a 'done_sending' marker
+                            log_func('Failed to send file %s: %s', f, e)
                     send_json(sock, {'type': 'done_sending'})
                 elif t == 'file':
-                    # we got a file header, now receive file bytes
                     receive_file(sock, base_dir, m)
+                    log_func('Received file from peer: %s', m['path'])
                 elif t == 'done_sending':
-                    logging.info('Peer finished sending requested files')
-                    # mark incoming finished
+                    log_func('Peer finished sending requested files')
                     incoming_done.set()
-                    # but keep loop in case peer sends more (rare)
                 else:
-                    logging.warning('Unknown message type: %s', t)
+                    log_func('Unknown message type: %s', t)
         except Exception as e:
-            logging.error('Receiver error: %s', e)
+            log_func('Receiver error: %s', e)
         finally:
             incoming_done.set()
 
     recv_thread = threading.Thread(target=receiver, daemon=True)
     recv_thread.start()
 
-    # send our want list
     send_json(sock, {'type': 'want', 'files': want})
-    logging.info('Sent want list to peer')
+    log_func('Sent want list to peer')
 
-    # Now process will_send: but we actually wait for peer to request; our receiver will handle requests
-    # Wait until both sides signal done (incoming_done set when peer sent 'done_sending')
-    # We also expect to receive files we requested; the peer will send 'done_sending' when done
-    # Block until incoming_done is set
-    logging.info('Waiting for peer to send files we requested...')
-    # Also set a timeout guard: if want is empty, peer may not send anything and will send 'done_sending' quickly
+    log_func('Waiting for peer to send files we requested...')
     incoming_done.wait(timeout=300)
-    logging.info('Incoming phase done (or timeout)')
-    # Close socket politely
+    log_func('Incoming phase done (or timeout)')
+    
     try:
         sock.shutdown(socket.SHUT_RDWR)
     except Exception:
@@ -267,39 +332,71 @@ def handle_connection(sock, base_dir):
     sock.close()
 
 
-def run_listen(port, base_dir, bind='0.0.0.0'):
-    logging.info('Listening on %s:%d', bind, port)
+def run_listen(port, base_dir, log_callback=None, bind='0.0.0.0'):
+    log_func = log_callback or logging.info
+    log_func('Listening on %s:%d', bind, port)
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         s.bind((bind, port))
         s.listen(1)
         conn, addr = s.accept()
-        logging.info('Accepted connection from %s:%d', addr[0], addr[1])
+        log_func('Accepted connection from %s:%d', addr[0], addr[1])
         with conn:
-            handle_connection(conn, base_dir)
+            handle_connection(conn, base_dir, log_callback)
 
 
-def run_connect(host, port, base_dir):
-    logging.info('Connecting to %s:%d ...', host, port)
+def run_connect(host, port, base_dir, log_callback=None):
+    log_func = log_callback or logging.info
+    log_func('Connecting to %s:%d ...', host, port)
     with socket.create_connection((host, port), timeout=30) as sock:
-        logging.info('Connected to %s:%d', host, port)
-        handle_connection(sock, base_dir)
+        log_func('Connected to %s:%d', host, port)
+        handle_connection(sock, base_dir, log_callback)
+
+
+def run_send(port, base_dir, log_callback=None, bind='0.0.0.0'):
+    """运行发送方模式"""
+    log_func = log_callback or logging.info
+    log_func('Starting as sender on %s:%d', bind, port)
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind((bind, port))
+        s.listen(1)
+        conn, addr = s.accept()
+        log_func('Accepted connection from receiver %s:%d', addr[0], addr[1])
+        with conn:
+            handle_unidirectional_send(conn, base_dir, log_callback)
+
+
+def run_receive(host, port, base_dir, log_callback=None):
+    """运行接收方模式"""
+    log_func = log_callback or logging.info
+    log_func('Connecting to sender %s:%d ...', host, port)
+    with socket.create_connection((host, port), timeout=30) as sock:
+        log_func('Connected to sender %s:%d', host, port)
+        handle_unidirectional_receive(sock, base_dir, log_callback)
 
 
 def main():
-    parser = argparse.ArgumentParser(description='LAN folder sync (one-shot, bidirectional)')
+    parser = argparse.ArgumentParser(description='LAN folder sync (support bidirectional and unidirectional)')
     group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument('--listen', action='store_true', help='listen for a peer')
-    group.add_argument('--connect', metavar='HOST', help='connect to a listening peer')
+    group.add_argument('--listen', action='store_true', help='listen for a peer (bidirectional)')
+    group.add_argument('--connect', metavar='HOST', help='connect to a listening peer (bidirectional)')
+    group.add_argument('--send', action='store_true', help='run as sender (unidirectional)')
+    group.add_argument('--receive', metavar='HOST', help='connect to a sender (unidirectional)')
     parser.add_argument('--port', type=int, default=9000, help='port to listen/connect (default: 9000)')
     parser.add_argument('--bind', default='0.0.0.0', help='bind address for listen (default: 0.0.0.0)')
     args = parser.parse_args()
     cwd = os.getcwd()
     logging.info('Working dir: %s', cwd)
+    
     if args.listen:
         run_listen(args.port, cwd, bind=args.bind)
-    else:
+    elif args.connect:
         run_connect(args.connect, args.port, cwd)
+    elif args.send:
+        run_send(args.port, cwd, bind=args.bind)
+    elif args.receive:
+        run_receive(args.receive, args.port, cwd)
 
 if __name__ == '__main__':
     main()

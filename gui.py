@@ -3,10 +3,10 @@
 
 Features:
 - Select folder to sync
-- Choose mode: listen or connect
+- Choose mode: listen, connect, send, or receive
 - Set host/port
-- Start/Stop the underlying `sync.py` as a subprocess (working dir = chosen folder)
-- Show process stdout/stderr in a log window
+- Import and use sync module directly instead of subprocess
+- Show sync progress in a log window
 
 Usage:
     python gui.py
@@ -16,8 +16,21 @@ This file uses PyQt5 (listed in requirements.txt).
 
 import sys
 import os
+import threading
 from pathlib import Path
 from PyQt5 import QtWidgets, QtCore
+
+# 更稳健的导入方式
+try:
+    import sync
+except ImportError:
+    # 打包环境下的导入
+    import sys
+    from pathlib import Path
+    current_dir = Path(__file__).parent
+    if str(current_dir) not in sys.path:
+        sys.path.insert(0, str(current_dir))
+    import sync
 
 
 class SyncGui(QtWidgets.QWidget):
@@ -25,10 +38,8 @@ class SyncGui(QtWidgets.QWidget):
         super().__init__()
         self.setWindowTitle('LAN Sync - GUI')
         self.resize(700, 480)
-        self.proc = QtCore.QProcess(self)
-        self.proc.readyReadStandardOutput.connect(self.on_stdout)
-        self.proc.readyReadStandardError.connect(self.on_stderr)
-        self.proc.finished.connect(self.on_finished)
+        self.sync_thread = None
+        self.sync_running = False
 
         self._build_ui()
 
@@ -49,19 +60,27 @@ class SyncGui(QtWidgets.QWidget):
         form = QtWidgets.QFormLayout()
         self.mode_group = QtWidgets.QButtonGroup(self)
         # keep explicit references to the radio buttons so mode detection is robust
-        self.rb_listen = QtWidgets.QRadioButton('Listen')
-        self.rb_connect = QtWidgets.QRadioButton('Connect')
+        self.rb_listen = QtWidgets.QRadioButton('Listen (双向)')
+        self.rb_connect = QtWidgets.QRadioButton('Connect (双向)')
+        self.rb_send = QtWidgets.QRadioButton('Send (单向发送)')
+        self.rb_receive = QtWidgets.QRadioButton('Receive (单向接收)')
         self.rb_listen.setChecked(True)
         self.mode_group.addButton(self.rb_listen)
         self.mode_group.addButton(self.rb_connect)
+        self.mode_group.addButton(self.rb_send)
+        self.mode_group.addButton(self.rb_receive)
+        
+        # mode selection layout
         h2 = QtWidgets.QHBoxLayout()
         h2.addWidget(self.rb_listen)
         h2.addWidget(self.rb_connect)
+        h2.addWidget(self.rb_send)
+        h2.addWidget(self.rb_receive)
         form.addRow(QtWidgets.QLabel('Mode:'), h2)
 
         self.host_edit = QtWidgets.QLineEdit('')
         self.port_edit = QtWidgets.QLineEdit('9000')
-        form.addRow('Host (for connect):', self.host_edit)
+        form.addRow('Host (for connect/receive):', self.host_edit)
         form.addRow('Port:', self.port_edit)
         layout.addLayout(form)
 
@@ -83,7 +102,25 @@ class SyncGui(QtWidgets.QWidget):
         layout.addWidget(self.log, 1)
 
     def append_log(self, text):
+        # 使用信号槽机制确保线程安全
+        if isinstance(text, tuple) and len(text) > 1:
+            format_str = text[0]
+            args = text[1:]
+            text = format_str % args
+        
+        # 定义信号
+        QtCore.QMetaObject.invokeMethod(
+            self, 
+            "_safe_append_log", 
+            QtCore.Qt.QueuedConnection,
+            QtCore.Q_ARG(str, str(text))
+        )
+    
+    @QtCore.pyqtSlot(str)
+    def _safe_append_log(self, text):
+        """在主线程中安全地添加日志"""
         self.log.appendPlainText(text)
+        self.log.verticalScrollBar().setValue(self.log.verticalScrollBar().maximum())
 
     def on_browse(self):
         d = QtWidgets.QFileDialog.getExistingDirectory(self, 'Select folder', self.folder_edit.text())
@@ -91,72 +128,88 @@ class SyncGui(QtWidgets.QWidget):
             self.folder_edit.setText(d)
 
     def on_start(self):
+        if self.sync_running:
+            return
+            
         folder = self.folder_edit.text().strip()
         if not folder:
             QtWidgets.QMessageBox.warning(self, 'Error', 'Please choose a folder to sync')
             return
-        # use explicit button state rather than relying on ordering in mode_group.buttons()
-        mode = 'listen' if self.rb_listen.isChecked() else 'connect'
+        
+        if not os.path.exists(folder):
+            QtWidgets.QMessageBox.warning(self, 'Error', 'Selected folder does not exist')
+            return
+        
+        # determine mode
+        if self.rb_listen.isChecked():
+            mode = 'listen'
+        elif self.rb_connect.isChecked():
+            mode = 'connect'
+        elif self.rb_send.isChecked():
+            mode = 'send'
+        elif self.rb_receive.isChecked():
+            mode = 'receive'
+        else:
+            QtWidgets.QMessageBox.warning(self, 'Error', 'Please select a mode')
+            return
+            
         port = self.port_edit.text().strip()
         if not port.isdigit():
             QtWidgets.QMessageBox.warning(self, 'Error', 'Port must be a number')
             return
-        # build command
-        script_dir = Path(__file__).parent
-        sync_py = str(script_dir / 'sync.py')
-        cmd = [sys.executable, sync_py]
-        if mode == 'listen':
-            cmd += ['--listen', '--port', port]
-        else:
+        port = int(port)
+        
+        if mode in ['connect', 'receive']:
             host = self.host_edit.text().strip()
             if not host:
                 QtWidgets.QMessageBox.warning(self, 'Error', 'Please enter host to connect to')
                 return
-            cmd += ['--connect', host, '--port', port]
 
-        self.append_log('Starting: ' + ' '.join(cmd))
-        # set working directory to selected folder
-        self.proc.setWorkingDirectory(folder)
-        # start process
-        self.proc.start(cmd[0], cmd[1:])
-        started = self.proc.waitForStarted(3000)
-        if not started:
-            self.append_log('Failed to start process')
-            return
+        self.append_log(f'Starting {mode} mode...')
+        self.sync_running = True
         self.btn_start.setEnabled(False)
         self.btn_stop.setEnabled(True)
 
+        # 在单独的线程中运行同步逻辑
+        def run_sync():
+            try:
+                if mode == 'listen':
+                    sync.run_listen(port, folder, self.append_log)
+                elif mode == 'connect':
+                    sync.run_connect(host, port, folder, self.append_log)
+                elif mode == 'send':
+                    sync.run_send(port, folder, self.append_log)
+                elif mode == 'receive':
+                    sync.run_receive(host, port, folder, self.append_log)
+            except Exception as e:
+                self.append_log(f'Sync error: {e}')
+            finally:
+                self.sync_running = False
+                self.append_log('Sync finished')
+                # 使用信号槽机制更新UI
+                QtCore.QMetaObject.invokeMethod(self, "on_sync_finished", QtCore.Qt.QueuedConnection)
+
+        self.sync_thread = threading.Thread(target=run_sync, daemon=True)
+        self.sync_thread.start()
+
+    @QtCore.pyqtSlot()
+    def on_sync_finished(self):
+        self.btn_start.setEnabled(True)
+        self.btn_stop.setEnabled(False)
+
     def on_stop(self):
-        if self.proc.state() != QtCore.QProcess.NotRunning:
-            self.append_log('Stopping process...')
-            self.proc.terminate()
-            if not self.proc.waitForFinished(3000):
-                self.proc.kill()
-        self.btn_start.setEnabled(True)
-        self.btn_stop.setEnabled(False)
-
-    def on_stdout(self):
-        data = self.proc.readAllStandardOutput().data().decode('utf-8', errors='replace')
-        for line in data.splitlines():
-            self.append_log('[OUT] ' + line)
-
-    def on_stderr(self):
-        data = self.proc.readAllStandardError().data().decode('utf-8', errors='replace')
-        for line in data.splitlines():
-            self.append_log('[ERR] ' + line)
-
-    def on_finished(self, code, status):
-        self.append_log(f'Process finished (code={code}, status={status})')
-        self.btn_start.setEnabled(True)
-        self.btn_stop.setEnabled(False)
-
+        if self.sync_running:
+            self.append_log('Stopping sync...')
+            self.sync_running = False
+            # 这里无法直接停止同步线程，但可以设置标志让线程自然结束
+            self.btn_start.setEnabled(True)
+            self.btn_stop.setEnabled(False)
 
 def main():
     app = QtWidgets.QApplication(sys.argv)
     w = SyncGui()
     w.show()
     sys.exit(app.exec_())
-
 
 if __name__ == '__main__':
     main()
