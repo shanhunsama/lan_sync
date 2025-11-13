@@ -2,15 +2,19 @@
 
 import os
 import threading
+# 在文件顶部添加导入路径设置
 import sys
 from pathlib import Path
-from PyQt5 import QtWidgets, QtCore
-import socket
 
 # 添加项目根目录到Python路径
 project_root = Path(__file__).parent.parent
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
+
+# 然后更新导入语句
+from core.bidirectional import run_listen, run_connect
+from PyQt5 import QtWidgets, QtCore
+import socket
 
 import sync
 from config_manager import ConfigManager
