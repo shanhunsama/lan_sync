@@ -1,0 +1,27 @@
+{
+    "bidirectional": {
+        "folder": "F:\\codes\\python\\lan_sync",
+        "port": "9000",
+        "mode": "listen",
+        "host": "192.168.1.100"
+    },
+    "send": {
+        "folder": "F:\\codes\\python\\lan_sync",
+        "host": "192.168.1.100",
+        "port": "9000"
+    },
+    "receive": {
+        "folder": "F:\\codes\\python\\lan_sync",
+        "port": "9000"
+    },
+    "window": {
+        "width": 800,
+        "height": 600
+    },
+    "performance": {
+        "chunk_size": 1048576,
+        "socket_buffer_size": 4194304,
+        "disable_nagle": true,
+        "thread_count": 8
+    }
+}

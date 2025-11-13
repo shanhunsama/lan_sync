@@ -2,9 +2,16 @@
 
 import socket
 import threading
-import logging
 from pathlib import Path
 
+# 添加项目根目录到Python路径
+import sys
+project_root = Path(__file__).parent.parent
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
+
+from .helpers import get_socket_buffer_size, should_disable_nagle, get_thread_count
+from .network_services import create_socket_with_performance_settings
 from .helpers import send_json, recv_json, build_manifest
 from .file_transfer import send_file_by_rel, receive_file
 
@@ -123,3 +130,39 @@ def run_connect(host, port, base_dir, log_callback=None):
     with socket.create_connection((host, port), timeout=30) as sock:
         log_func('Connected to %s:%d', host, port)
         handle_connection(sock, base_dir, log_callback)
+
+
+def run_listen(port, folder, log_callback):
+    """监听模式（使用性能配置）"""
+    try:
+        sock = create_socket_with_performance_settings()
+        sock.bind(('0.0.0.0', port))
+        sock.listen(1)
+        log_callback(f'监听端口 {port}，等待连接...')
+        
+        conn, addr = sock.accept()
+        log_callback(f'接收到来自 {addr[0]}:{addr[1]} 的连接')
+        
+        # 执行双向同步逻辑
+        perform_bidirectional_sync(conn, folder, log_callback)
+        
+        conn.close()
+        sock.close()
+        log_callback('同步完成')
+    except Exception as e:
+        log_callback(f'同步错误: {e}')
+
+def run_connect(host, port, folder, log_callback):
+    """连接模式（使用性能配置）"""
+    try:
+        sock = create_socket_with_performance_settings()
+        sock.connect((host, port))
+        log_callback(f'已连接到 {host}:{port}')
+        
+        # 执行双向同步逻辑
+        perform_bidirectional_sync(sock, folder, log_callback)
+        
+        sock.close()
+        log_callback('同步完成')
+    except Exception as e:
+        log_callback(f'同步错误: {e}')

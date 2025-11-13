@@ -4,11 +4,45 @@ import os
 import json
 import struct
 import hashlib
+import sys
 from pathlib import Path
 
-# 全局配置
-CHUNK_SIZE = 64 * 1024
+# 添加项目根目录到Python路径
+project_root = Path(__file__).parent.parent
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
 
+from config_manager import ConfigManager
+
+# 全局配置管理器实例
+_config_manager = ConfigManager()
+
+def get_performance_config():
+    """获取性能配置"""
+    return _config_manager.get_performance_config()
+
+def get_chunk_size():
+    """获取动态块大小"""
+    config = get_performance_config()
+    return config.get('chunk_size', 262144)  # 默认256KB
+
+def get_socket_buffer_size():
+    """获取套接字缓冲区大小"""
+    config = get_performance_config()
+    return config.get('socket_buffer_size', 1048576)  # 默认1MB
+
+def should_disable_nagle():
+    """是否禁用Nagle算法"""
+    config = get_performance_config()
+    return config.get('disable_nagle', True)
+
+def get_thread_count():
+    """获取并发线程数"""
+    config = get_performance_config()
+    return config.get('thread_count', 4)
+
+# 保持向后兼容性
+CHUNK_SIZE = get_chunk_size()
 
 def compute_sha256(path):
     """计算文件的SHA256哈希值"""

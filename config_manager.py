@@ -30,7 +30,8 @@ class ConfigManager:
             "performance": {
                 "chunk_size": 262144,  # 256KB
                 "socket_buffer_size": 1048576,  # 1MB
-                "disable_nagle": True
+                "disable_nagle": True,
+                "thread_count": 4
             }
         }
         self.config = self._load_config()

@@ -12,6 +12,7 @@ if str(project_root) not in sys.path:
 from .bidirectional_tab import BidirectionalTab
 from .send_tab import SendTab
 from .receive_tab import ReceiveTab
+from .performance_tab import PerformanceTab
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -41,9 +42,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.bidirectional_tab = BidirectionalTab()
         self.send_tab = SendTab()
         self.receive_tab = ReceiveTab()
+        self.performance_tab = PerformanceTab()
         
         self.tab_widget.addTab(self.bidirectional_tab, "双向同步")
         self.tab_widget.addTab(self.send_tab, "发送文件")
         self.tab_widget.addTab(self.receive_tab, "接收文件")
+        self.tab_widget.addTab(self.performance_tab, "性能配置")
         
         main_layout.addWidget(self.tab_widget)

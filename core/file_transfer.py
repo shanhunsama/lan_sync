@@ -5,7 +5,7 @@ import struct
 import logging
 from pathlib import Path
 
-from .helpers import recvn, send_json, CHUNK_SIZE
+from .helpers import recvn, send_json, get_chunk_size, get_socket_buffer_size, should_disable_nagle
 
 
 def send_file_by_rel(sock, base_dir, relpath):
@@ -15,9 +15,12 @@ def send_file_by_rel(sock, base_dir, relpath):
     header = {'type': 'file', 'path': relpath, 'size': size}
     send_json(sock, header)
     
+    # 使用动态块大小
+    chunk_size = get_chunk_size()
+    
     with open(path, 'rb') as f:
         while True:
-            chunk = f.read(CHUNK_SIZE)
+            chunk = f.read(chunk_size)
             if not chunk:
                 break
             # 发送原始块长度 + 块数据
