@@ -41,6 +41,78 @@ def get_thread_count():
     config = get_performance_config()
     return config.get('thread_count', 4)
 
+# 新增性能优化函数
+def should_use_memory_mapping():
+    """是否使用内存映射"""
+    config = get_performance_config()
+    return config.get('use_memory_mapping', True)
+
+def should_use_stream_protocol():
+    """是否使用流式协议"""
+    config = get_performance_config()
+    return config.get('use_stream_protocol', True)
+
+def should_use_dynamic_chunk_size():
+    """是否使用动态块大小"""
+    config = get_performance_config()
+    return config.get('dynamic_chunk_size', True)
+
+def get_max_chunk_size():
+    """获取最大块大小"""
+    config = get_performance_config()
+    return config.get('max_chunk_size', 1048576)  # 1MB
+
+def get_min_chunk_size():
+    """获取最小块大小"""
+    config = get_performance_config()
+    return config.get('min_chunk_size', 65536)  # 64KB
+
+def get_compression_threshold():
+    """获取压缩阈值"""
+    config = get_performance_config()
+    return config.get('compression_threshold', 1048576)  # 1MB
+
+def should_enable_compression():
+    """是否启用压缩"""
+    config = get_performance_config()
+    return config.get('enable_compression', False)
+
+def should_use_adaptive_threading():
+    """是否使用自适应线程数"""
+    config = get_performance_config()
+    return config.get('adaptive_threading', True)
+
+def calculate_optimal_chunk_size(file_size):
+    """计算最优块大小"""
+    if not should_use_dynamic_chunk_size():
+        return get_chunk_size()
+    
+    min_size = get_min_chunk_size()
+    max_size = get_max_chunk_size()
+    
+    # 根据文件大小动态调整块大小
+    if file_size < 10 * 1024 * 1024:  # 小于10MB
+        return min_size
+    elif file_size < 100 * 1024 * 1024:  # 10MB-100MB
+        return min(max_size // 4, max_size)
+    else:  # 大于100MB
+        return max_size
+
+def calculate_optimal_threads(file_size):
+    """计算最优线程数"""
+    if not should_use_adaptive_threading():
+        return get_thread_count()
+    
+    base_threads = get_thread_count()
+    
+    # 根据文件大小动态调整线程数
+    if file_size < 5 * 1024 * 1024:  # 小于5MB
+        return min(2, base_threads)
+    elif file_size < 50 * 1024 * 1024:  # 5MB-50MB
+        return base_threads
+    else:  # 大于50MB
+        return min(base_threads * 2, 16)  # 最多16线程
+
 # 保持向后兼容性
 CHUNK_SIZE = get_chunk_size()
 

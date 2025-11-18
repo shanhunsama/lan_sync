@@ -32,7 +32,8 @@ class PerformanceTab(QtWidgets.QWidget):
         info_label = QtWidgets.QLabel(
             "配置传输性能参数以优化文件同步速度和资源使用。\n"
             "较大的块大小可以提高传输速度，但会占用更多内存。\n"
-            "较大的缓冲区可以提高网络传输效率。"
+            "较大的缓冲区可以提高网络传输效率。\n"
+            "高级优化功能可以进一步提升传输性能。"
         )
         info_label.setWordWrap(True)
         info_label.setStyleSheet("color: #666; font-size: 12px;")
@@ -77,6 +78,66 @@ class PerformanceTab(QtWidgets.QWidget):
         form_layout.addRow('', self.nagle_checkbox)
         form_layout.addRow('并发线程数:', self.thread_count_spin)
         layout.addWidget(performance_group)
+        
+        # === 高级优化设置 ===
+        optimization_group = QtWidgets.QGroupBox("高级优化设置")
+        optimization_layout = QtWidgets.QFormLayout(optimization_group)
+        
+        # 内存映射优化
+        self.memory_mapping_checkbox = QtWidgets.QCheckBox("启用内存映射传输 (推荐)")
+        self.memory_mapping_checkbox.setToolTip("使用内存映射技术减少系统调用，提高大文件传输速度")
+        
+        # 流式协议优化
+        self.stream_protocol_checkbox = QtWidgets.QCheckBox("启用流式协议 (推荐)")
+        self.stream_protocol_checkbox.setToolTip("使用流式协议消除长度前缀开销，提高传输效率")
+        
+        # 动态块大小调整
+        self.dynamic_chunk_checkbox = QtWidgets.QCheckBox("启用动态块大小调整")
+        self.dynamic_chunk_checkbox.setToolTip("根据文件大小自动调整块大小，优化不同大小文件的传输")
+        
+        # 自适应线程数
+        self.adaptive_threading_checkbox = QtWidgets.QCheckBox("启用自适应线程数")
+        self.adaptive_threading_checkbox.setToolTip("根据文件大小自动调整并发线程数")
+        
+        # 压缩传输
+        self.compression_checkbox = QtWidgets.QCheckBox("启用压缩传输")
+        self.compression_checkbox.setToolTip("对可压缩文件进行实时压缩传输")
+        
+        # 压缩阈值
+        self.compression_threshold_combo = QtWidgets.QComboBox()
+        self.compression_threshold_combo.addItem("100KB", 102400)
+        self.compression_threshold_combo.addItem("500KB", 512000)
+        self.compression_threshold_combo.addItem("1MB (推荐)", 1048576)
+        self.compression_threshold_combo.addItem("5MB", 5242880)
+        self.compression_threshold_combo.addItem("10MB", 10485760)
+        self.compression_threshold_combo.setToolTip("文件大小超过此阈值时启用压缩")
+        
+        optimization_layout.addRow('', self.memory_mapping_checkbox)
+        optimization_layout.addRow('', self.stream_protocol_checkbox)
+        optimization_layout.addRow('', self.dynamic_chunk_checkbox)
+        optimization_layout.addRow('', self.adaptive_threading_checkbox)
+        optimization_layout.addRow('', self.compression_checkbox)
+        optimization_layout.addRow('压缩阈值:', self.compression_threshold_combo)
+        layout.addWidget(optimization_group)
+        
+        # === 性能测试区域 ===
+        test_group = QtWidgets.QGroupBox("性能测试")
+        test_layout = QtWidgets.QVBoxLayout(test_group)
+        
+        # 测试按钮
+        self.btn_test = QtWidgets.QPushButton('运行性能测试')
+        self.btn_test.clicked.connect(self.on_run_test)
+        self.btn_test.setStyleSheet("background-color: #FF9800; color: white; font-weight: bold;")
+        
+        # 测试结果显示
+        self.test_result_text = QtWidgets.QTextEdit()
+        self.test_result_text.setMaximumHeight(120)
+        self.test_result_text.setReadOnly(True)
+        self.test_result_text.setPlaceholderText("性能测试结果将显示在这里...")
+        
+        test_layout.addWidget(self.btn_test)
+        test_layout.addWidget(self.test_result_text)
+        layout.addWidget(test_group)
         
         # === 控制按钮 ===
         button_layout = QtWidgets.QHBoxLayout()
@@ -134,6 +195,29 @@ class PerformanceTab(QtWidgets.QWidget):
         thread_count = performance_config.get('thread_count', 4)
         self.thread_count_spin.setValue(thread_count)
         
+        # 设置高级优化选项
+        self.memory_mapping_checkbox.setChecked(
+            performance_config.get('use_memory_mapping', True)
+        )
+        self.stream_protocol_checkbox.setChecked(
+            performance_config.get('use_stream_protocol', True)
+        )
+        self.dynamic_chunk_checkbox.setChecked(
+            performance_config.get('dynamic_chunk_size', True)
+        )
+        self.adaptive_threading_checkbox.setChecked(
+            performance_config.get('adaptive_threading', True)
+        )
+        self.compression_checkbox.setChecked(
+            performance_config.get('enable_compression', False)
+        )
+        
+        # 设置压缩阈值
+        compression_threshold = performance_config.get('compression_threshold', 1048576)
+        index = self.compression_threshold_combo.findData(compression_threshold)
+        if index >= 0:
+            self.compression_threshold_combo.setCurrentIndex(index)
+        
         self.status_label.setText("当前配置已加载")
         self.status_label.setStyleSheet("color: green; font-weight: bold;")
     
@@ -170,9 +254,44 @@ class PerformanceTab(QtWidgets.QWidget):
             'chunk_size': self.chunk_size_combo.currentData(),
             'socket_buffer_size': self.buffer_size_combo.currentData(),
             'disable_nagle': self.nagle_checkbox.isChecked(),
-            'thread_count': self.thread_count_spin.value()
+            'thread_count': self.thread_count_spin.value(),
+            'use_memory_mapping': self.memory_mapping_checkbox.isChecked(),
+            'use_stream_protocol': self.stream_protocol_checkbox.isChecked(),
+            'dynamic_chunk_size': self.dynamic_chunk_checkbox.isChecked(),
+            'adaptive_threading': self.adaptive_threading_checkbox.isChecked(),
+            'enable_compression': self.compression_checkbox.isChecked(),
+            'compression_threshold': self.compression_threshold_combo.currentData(),
+            'max_chunk_size': 1048576,  # 1MB
+            'min_chunk_size': 65536     # 64KB
         }
         self.config_manager.set_performance_config(performance_config)
+    
+    def on_run_test(self):
+        """运行性能测试"""
+        try:
+            from core.performance_tester import PerformanceTester
+            tester = PerformanceTester()
+            
+            # 创建测试文件
+            test_file = "test_performance.bin"
+            test_size = 50 * 1024 * 1024  # 50MB
+            
+            import os
+            if not os.path.exists(test_file):
+                self.test_result_text.append("正在创建测试文件...")
+                with open(test_file, 'wb') as f:
+                    f.write(b'0' * test_size)
+            
+            self.test_result_text.append("开始性能测试...")
+            avg_speed, std_dev = tester.test_transfer_speed(test_file, iterations=3)
+            report = tester.generate_report()
+            
+            self.test_result_text.clear()
+            self.test_result_text.append(report)
+            self.test_result_text.append(f"\n测试文件: {test_file} ({test_size/(1024*1024):.1f}MB)")
+            
+        except Exception as e:
+            self.test_result_text.append(f"性能测试失败: {str(e)}")
     
     def get_performance_config(self):
         """获取当前性能配置"""

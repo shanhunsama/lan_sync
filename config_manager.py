@@ -31,7 +31,15 @@ class ConfigManager:
                 "chunk_size": 262144,  # 256KB
                 "socket_buffer_size": 1048576,  # 1MB
                 "disable_nagle": True,
-                "thread_count": 4
+                "thread_count": 4,
+                "use_memory_mapping": True,  # 新增：启用内存映射
+                "use_stream_protocol": True,  # 新增：启用流式协议
+                "dynamic_chunk_size": True,  # 新增：启用动态块大小
+                "max_chunk_size": 1048576,  # 新增：最大块大小1MB
+                "min_chunk_size": 65536,  # 新增：最小块大小64KB
+                "compression_threshold": 1048576,  # 新增：压缩阈值1MB
+                "enable_compression": False,  # 新增：启用压缩
+                "adaptive_threading": True  # 新增：自适应线程数
             }
         }
         self.config = self._load_config()

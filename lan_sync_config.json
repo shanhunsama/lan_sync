@@ -22,6 +22,14 @@
         "chunk_size": 1048576,
         "socket_buffer_size": 4194304,
         "disable_nagle": true,
-        "thread_count": 8
+        "thread_count": 8,
+        "use_memory_mapping": true,
+        "use_stream_protocol": true,
+        "dynamic_chunk_size": true,
+        "adaptive_threading": true,
+        "enable_compression": false,
+        "compression_threshold": 1048576,
+        "max_chunk_size": 1048576,
+        "min_chunk_size": 65536
     }
 }
